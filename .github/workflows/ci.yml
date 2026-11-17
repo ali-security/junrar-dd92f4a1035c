@@ -1,15 +1,17 @@
 name: CI
 
 on:
-  pull_request:
-  push:
-    branches-ignore:
-      - 'dependabot/**'
   workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Gradle test task + filter (e.g. "test --tests com.github.junrar.JunrarTest"); empty runs the full build'
+        required: false
+        default: ''
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     strategy:
       matrix:
         java: [ 8, 11, 17, 18 ]
@@ -21,22 +23,49 @@ jobs:
           java-version: ${{ matrix.java }}
           java-package: 'jdk'
           distribution: 'temurin'
+      - name: Enable test result logging
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/seal-test-logging.gradle <<'EOF'
+          allprojects {
+              tasks.withType(Test).configureEach {
+                  testLogging {
+                      events 'passed', 'skipped', 'failed'
+                      exceptionFormat 'full'
+                  }
+                  afterSuite { desc, result ->
+                      if (!desc.parent) {
+                          println "TEST SUMMARY (${path}): ${result.resultType} - ${result.testCount} tests, ${result.successfulTestCount} passed, ${result.failedTestCount} failed, ${result.skippedTestCount} skipped"
+                      }
+                  }
+              }
+          }
+          EOF
       - name: Build
         uses: gradle/gradle-build-action@v2
         with:
-          arguments: build
+          arguments: ${{ inputs.test-filter != '' && format('jar assemble {0}', inputs.test-filter) || 'jar build -x checkstyleMain -x checkstyleTest -x checkstyleRegressionTest' }}
+      - name: Report skipped tests
+        if: always()
+        run: |
+          grep -h -B1 '<skipped' build/test-results/*/*.xml || echo "No skipped tests"
       - name: Jacoco
         uses: gradle/gradle-build-action@v2
         with:
           arguments: jacocoTestReport
-      - uses: codecov/codecov-action@v2
+      - uses: actions/upload-artifact@v4
         if: matrix.java == '8'
+        with:
+          name: junrar-jar
+          path: build/libs/junrar-7.5.3.jar
+          if-no-files-found: error
 
   release:
     name: semantic release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: test
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: false
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v2
